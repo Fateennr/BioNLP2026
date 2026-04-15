@@ -1,0 +1,16 @@
+# Chroma vector DB
+data/chroma/
+data/raw/
+
+# Optional: ignore any processed / temp data
+data/processed/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# OS files
+.DS_Store
