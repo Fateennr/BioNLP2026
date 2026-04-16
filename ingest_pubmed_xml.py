@@ -8,7 +8,7 @@ from typing import List, Optional, Iterable
 from langchain_core.documents import Document
 from tqdm import tqdm
 
-from app.article_type import infer_article_type
+from article_type import infer_article_type
 
 
 def get_text(elem, path: str, default: str = "") -> str:
@@ -61,7 +61,31 @@ def parse_authors(article) -> List[str]:
     return authors
 
 
+def parse_abstract_sections(article) -> List[dict]:
+    """
+    Parse structured abstract into labelled sections.
+
+    Returns a list of dicts with keys 'label' and 'text'.
+    Unstructured abstracts are returned as a single section with label None.
+    Structured abstracts typically carry labels like BACKGROUND, METHODS,
+    RESULTS, CONCLUSIONS — preserving these is critical for section-aware
+    retrieval in biomedical RAG.
+    """
+    sections = []
+    for node in article.findall(".//Abstract/AbstractText"):
+        label = node.attrib.get("Label") or None
+        text = "".join(node.itertext()).strip()
+        if not text:
+            continue
+        sections.append({"label": label, "text": text})
+    return sections
+
+
 def parse_abstract(article) -> str:
+    """
+    Flat string representation of the abstract (used in page_content
+    so the document is self-contained for embedding).
+    """
     parts = []
     for node in article.findall(".//Abstract/AbstractText"):
         label = node.attrib.get("Label")
@@ -76,8 +100,18 @@ def parse_abstract(article) -> str:
 
 
 def clean_metadata(metadata: dict) -> dict:
+    """
+    Chroma requires all metadata values to be str, int, float, or bool.
+    Lists are joined into semicolon-separated strings.
+    Nones and empty values are dropped.
+    abstract_sections (list of dicts) is intentionally excluded here —
+    it is carried separately and consumed during chunking.
+    """
     cleaned = {}
     for k, v in metadata.items():
+        if k == "abstract_sections":
+            # Handled separately; not a valid Chroma metadata type
+            continue
         if v is None:
             continue
         if isinstance(v, list):
@@ -94,6 +128,7 @@ def clean_metadata(metadata: dict) -> dict:
 def parse_document(article) -> Optional[Document]:
     pmid = get_text(article, ".//PMID")
     title = "".join(article.findtext(".//ArticleTitle", default="")).strip()
+    abstract_sections = parse_abstract_sections(article)
     abstract = parse_abstract(article)
     publication_types = get_all_texts(article, ".//PublicationType")
     mesh_terms = get_all_texts(article, ".//MeshHeading/DescriptorName")
@@ -107,10 +142,11 @@ def parse_document(article) -> Optional[Document]:
 
     article_type = infer_article_type(title=title, publication_types=publication_types)
 
-    # Keep title in content too, not only metadata
+    # page_content is the full flat abstract — used as fallback and for
+    # document-level retrieval. Section-level chunks are built in build_vector_store.
     page_content = f"Title: {title}\n\n{abstract}".strip() if abstract else f"Title: {title}"
 
-    metadata = clean_metadata({
+    flat_metadata = clean_metadata({
         "pmid": pmid or "",
         "title": title or "",
         "article_type": article_type,
@@ -123,7 +159,11 @@ def parse_document(article) -> Optional[Document]:
         "source": "pubmed_xml",
     })
 
-    return Document(page_content=page_content, metadata=metadata)
+    # abstract_sections is stored outside flat_metadata so build_vector_store
+    # can iterate sections without re-parsing the XML.
+    doc = Document(page_content=page_content, metadata=flat_metadata)
+    doc.metadata["abstract_sections"] = abstract_sections  # list[dict], stripped before Chroma insert
+    return doc
 
 
 def iter_pubmed_articles_from_xml_file(xml_file: str) -> Iterable[Document]:
@@ -194,6 +234,7 @@ def main():
         print("Title:", docs[0].metadata.get("title"))
         print("Type:", docs[0].metadata.get("article_type"))
         print("PMID:", docs[0].metadata.get("pmid"))
+        print("Sections:", [s["label"] for s in docs[0].metadata.get("abstract_sections", [])])
         print("Text preview:", docs[0].page_content[:300])
 
 
