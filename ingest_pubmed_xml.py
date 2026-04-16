@@ -10,6 +10,30 @@ from tqdm import tqdm
 
 from article_type import infer_article_type
 
+def iter_pubmed_articles_stream(file_obj) -> Iterable[Document]:
+    """
+    Stream PubMedArticle elements one by one without loading the full XML tree.
+    This is the memory-safe way to parse large PubMed dumps.
+    """
+    context = ET.iterparse(file_obj, events=("end",))
+    for event, elem in context:
+        if elem.tag == "PubmedArticle":
+            doc = parse_document(elem)
+            if doc is not None:
+                yield doc
+
+            # critical: free memory for this article
+            elem.clear()
+
+def iter_pubmed_articles_from_xml_file(xml_file: str) -> Iterable[Document]:
+    with open(xml_file, "rb") as f:
+        yield from iter_pubmed_articles_stream(f)
+
+
+def iter_pubmed_articles_from_gz_file(gz_file: str) -> Iterable[Document]:
+    with gzip.open(gz_file, "rb") as f:
+        yield from iter_pubmed_articles_stream(f)
+
 
 def get_text(elem, path: str, default: str = "") -> str:
     found = elem.find(path)
@@ -166,28 +190,7 @@ def parse_document(article) -> Optional[Document]:
     return doc
 
 
-def iter_pubmed_articles_from_xml_file(xml_file: str) -> Iterable[Document]:
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
-    for article in root.findall(".//PubmedArticle"):
-        doc = parse_document(article)
-        if doc is not None:
-            yield doc
-
-
-def iter_pubmed_articles_from_gz_file(gz_file: str) -> Iterable[Document]:
-    with gzip.open(gz_file, "rb") as f:
-        tree = ET.parse(f)
-        root = tree.getroot()
-        for article in root.findall(".//PubmedArticle"):
-            doc = parse_document(article)
-            if doc is not None:
-                yield doc
-
-
-def load_pubmed_path(path: str) -> List[Document]:
-    docs: List[Document] = []
-
+def load_pubmed_path(path: str) -> Iterable[Document]:
     if os.path.isdir(path):
         xml_files = sorted(glob.glob(os.path.join(path, "*.xml")))
         gz_files = sorted(glob.glob(os.path.join(path, "*.xml.gz")))
@@ -198,20 +201,20 @@ def load_pubmed_path(path: str) -> List[Document]:
 
         for file_path in tqdm(all_files, desc="Parsing PubMed files"):
             if file_path.endswith(".xml.gz"):
-                docs.extend(iter_pubmed_articles_from_gz_file(file_path))
+                yield from iter_pubmed_articles_from_gz_file(file_path)
             elif file_path.endswith(".xml"):
-                docs.extend(iter_pubmed_articles_from_xml_file(file_path))
-
-        return docs
+                yield from iter_pubmed_articles_from_xml_file(file_path)
+        return
 
     if path.endswith(".xml.gz"):
-        return list(iter_pubmed_articles_from_gz_file(path))
+        yield from iter_pubmed_articles_from_gz_file(path)
+        return
 
     if path.endswith(".xml"):
-        return list(iter_pubmed_articles_from_xml_file(path))
+        yield from iter_pubmed_articles_from_xml_file(path)
+        return
 
     raise ValueError(f"Unsupported input path: {path}")
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -226,17 +229,23 @@ def main():
     if not os.path.exists(args.xml_path):
         raise FileNotFoundError(f"Input path not found: {args.xml_path}")
 
-    docs = load_pubmed_path(args.xml_path)
-    print(f"Parsed {len(docs)} documents")
+    count = 0
+    first_doc = None
 
-    if docs:
+    for doc in load_pubmed_path(args.xml_path):
+        if first_doc is None:
+            first_doc = doc
+        count += 1
+
+    print(f"Parsed {count} documents")
+
+    if first_doc:
         print("\nSample document:")
-        print("Title:", docs[0].metadata.get("title"))
-        print("Type:", docs[0].metadata.get("article_type"))
-        print("PMID:", docs[0].metadata.get("pmid"))
-        print("Sections:", [s["label"] for s in docs[0].metadata.get("abstract_sections", [])])
-        print("Text preview:", docs[0].page_content[:300])
-
+        print("Title:", first_doc.metadata.get("title"))
+        print("Type:", first_doc.metadata.get("article_type"))
+        print("PMID:", first_doc.metadata.get("pmid"))
+        print("Sections:", [s["label"] for s in first_doc.metadata.get("abstract_sections", [])])
+        print("Text preview:", first_doc.page_content[:300])
 
 if __name__ == "__main__":
     main()
