@@ -1,9 +1,10 @@
 import argparse
+import gzip
 import os
+import glob
 import xml.etree.ElementTree as ET
-from typing import List, Optional
+from typing import List, Optional, Iterable
 
-from dotenv import load_dotenv
 from langchain_core.documents import Document
 from tqdm import tqdm
 
@@ -74,6 +75,22 @@ def parse_abstract(article) -> str:
     return "\n".join(parts).strip()
 
 
+def clean_metadata(metadata: dict) -> dict:
+    cleaned = {}
+    for k, v in metadata.items():
+        if v is None:
+            continue
+        if isinstance(v, list):
+            if not v:
+                continue
+            joined = "; ".join(str(x) for x in v if x is not None and str(x).strip())
+            if joined:
+                cleaned[k] = joined
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
 def parse_document(article) -> Optional[Document]:
     pmid = get_text(article, ".//PMID")
     title = "".join(article.findtext(".//ArticleTitle", default="")).strip()
@@ -90,49 +107,86 @@ def parse_document(article) -> Optional[Document]:
 
     article_type = infer_article_type(title=title, publication_types=publication_types)
 
-    page_content = abstract if abstract else title
+    # Keep title in content too, not only metadata
+    page_content = f"Title: {title}\n\n{abstract}".strip() if abstract else f"Title: {title}"
 
-    metadata = {
+    metadata = clean_metadata({
         "pmid": pmid or "",
         "title": title or "",
         "article_type": article_type,
         "journal": journal or "",
         "year": year if year is not None else 0,
         "doi": doi or "",
-        "authors": "; ".join(authors) if authors else "",
-        "publication_types": "; ".join(publication_types) if publication_types else "",
-        "mesh_terms": "; ".join(mesh_terms) if mesh_terms else "",
+        "authors": authors,
+        "publication_types": publication_types,
+        "mesh_terms": mesh_terms,
         "source": "pubmed_xml",
-    }
+    })
 
     return Document(page_content=page_content, metadata=metadata)
 
 
-def load_pubmed_xml(xml_path: str) -> List[Document]:
-    tree = ET.parse(xml_path)
+def iter_pubmed_articles_from_xml_file(xml_file: str) -> Iterable[Document]:
+    tree = ET.parse(xml_file)
     root = tree.getroot()
-    docs: List[Document] = []
-
-    articles = root.findall(".//PubmedArticle")
-    for article in tqdm(articles, desc="Parsing XML"):
+    for article in root.findall(".//PubmedArticle"):
         doc = parse_document(article)
         if doc is not None:
-            docs.append(doc)
+            yield doc
 
-    return docs
+
+def iter_pubmed_articles_from_gz_file(gz_file: str) -> Iterable[Document]:
+    with gzip.open(gz_file, "rb") as f:
+        tree = ET.parse(f)
+        root = tree.getroot()
+        for article in root.findall(".//PubmedArticle"):
+            doc = parse_document(article)
+            if doc is not None:
+                yield doc
+
+
+def load_pubmed_path(path: str) -> List[Document]:
+    docs: List[Document] = []
+
+    if os.path.isdir(path):
+        xml_files = sorted(glob.glob(os.path.join(path, "*.xml")))
+        gz_files = sorted(glob.glob(os.path.join(path, "*.xml.gz")))
+        all_files = xml_files + gz_files
+
+        if not all_files:
+            raise RuntimeError(f"No .xml or .xml.gz files found in folder: {path}")
+
+        for file_path in tqdm(all_files, desc="Parsing PubMed files"):
+            if file_path.endswith(".xml.gz"):
+                docs.extend(iter_pubmed_articles_from_gz_file(file_path))
+            elif file_path.endswith(".xml"):
+                docs.extend(iter_pubmed_articles_from_xml_file(file_path))
+
+        return docs
+
+    if path.endswith(".xml.gz"):
+        return list(iter_pubmed_articles_from_gz_file(path))
+
+    if path.endswith(".xml"):
+        return list(iter_pubmed_articles_from_xml_file(path))
+
+    raise ValueError(f"Unsupported input path: {path}")
 
 
 def main():
-    load_dotenv()
-
     parser = argparse.ArgumentParser()
-    parser.add_argument("--xml_path", type=str, default="data/raw/articles.xml")
+    parser.add_argument(
+        "--xml_path",
+        type=str,
+        default="data/raw/pubmed",
+        help="Path to a .xml file, .xml.gz file, or folder containing PubMed files",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.xml_path):
-        raise FileNotFoundError(f"XML file not found: {args.xml_path}")
+        raise FileNotFoundError(f"Input path not found: {args.xml_path}")
 
-    docs = load_pubmed_xml(args.xml_path)
+    docs = load_pubmed_path(args.xml_path)
     print(f"Parsed {len(docs)} documents")
 
     if docs:

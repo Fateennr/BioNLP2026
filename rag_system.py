@@ -27,7 +27,7 @@ class MedicalRAG:
         load_dotenv()
 
         self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name="NeuML/pubmedbert-base-embeddings"
         )
         self.vectorstore = Chroma(
             persist_directory=persist_directory,
